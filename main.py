@@ -53,7 +53,6 @@ def mvg_api(stations, api_type="departures", combine_departures=False):
 
     if combine_departures:
         combined.sort(key=lambda x: x.get("planned", 0))
-        print(combined)
         return combined
     else:
         return results
