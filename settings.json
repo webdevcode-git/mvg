@@ -1,9 +1,0 @@
-{
-    "stations": [
-        "Klinikum Gro\u00dfhadern",
-        "Max-Lebschke Platz"
-    ],
-    "update_interval": 30,
-    "admin_user": "admin",
-    "admin_hash": "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6L6s57TH7WvQ3Vma"
-}

@@ -10,19 +10,33 @@ import pyotp
 import logging
 from datetime import datetime, timedelta
 
-# Filter frequent polling logs to keep the console clean for 2FA prompts
+# ------------------------------
+# Logging filter to reduce spam
+# ------------------------------
 logging.getLogger("uvicorn.access").addFilter(
     lambda record: "/admin/check-auth" not in record.getMessage() and "/ws" not in record.getMessage()
 )
 
+# ------------------------------
+# FastAPI & security
+# ------------------------------
 app = FastAPI()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# ------------------------------
+# GLOBALS
+# ------------------------------
 SETTINGS = {}
 ACTIVE_SESSIONS = {}
-TEMP_ACCESS = None 
+TEMP_ACCESS = None
 cached_departures = []
 
+# SCALING FACTOR
+SCALING = 0.8  # 1.0 = 100%, 1.5 = 150%, etc.
+
+# ------------------------------
+# SETTINGS LOADING/SAVING
+# ------------------------------
 def load_settings():
     global SETTINGS
     defaults = {
@@ -37,7 +51,8 @@ def load_settings():
             with open("settings.json", "r", encoding="utf-8") as f:
                 SETTINGS = {**defaults, **json.load(f)}
                 return
-        except: pass
+        except:
+            pass
     SETTINGS = defaults
 
 def save_settings():
@@ -46,17 +61,22 @@ def save_settings():
 
 load_settings()
 
+# ------------------------------
+# SESSION DEPENDENCY
+# ------------------------------
 async def get_session(request: Request):
     session_id = request.cookies.get("admin_session")
     if not session_id or session_id not in ACTIVE_SESSIONS:
         return None
     return ACTIVE_SESSIONS[session_id]
 
+# ------------------------------
+# UPDATE DEPARTURES TASK
+# ------------------------------
 async def update_departures():
     global cached_departures
     while True:
         try:
-            # Fetches data from your existing mvg_api function
             data = main.mvg_api(SETTINGS["stations"], api_type="departures", combine_departures=True)
             cached_departures = data
             await manager.broadcast(cached_departures)
@@ -68,42 +88,42 @@ async def update_departures():
 async def startup_event():
     asyncio.create_task(update_departures())
 
-# --- LOGIN & AUTHENTICATION ---
-
+# ------------------------------
+# ADMIN LOGIN / 2FA
+# ------------------------------
 @app.get("/admin/login", response_class=HTMLResponse)
 async def login_page():
     return """
     <html>
-        <head><title>Admin Login</title>
-        <style>
-            body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f0f2f5; margin: 0; }
-            .box { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 320px; text-align: center; }
-            input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
-            .btn-blue { width: 100%; padding: 10px; background: #0055a4; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
-            .btn-temp { width: 100%; padding: 8px; background: #fff; color: #d97706; border: 1px solid #d97706; border-radius: 5px; cursor: pointer; margin-top: 20px; font-size: 11px; }
-            .hint { font-size: 11px; color: #777; margin-top: 10px; }
-        </style>
-        </head>
-        <body>
-            <div class="box">
-                <h2>Admin Login</h2>
-                <form action="/admin/login" method="post">
-                    <input type="text" name="username" placeholder="Username or TOTP Code" required>
-                    <input type="password" name="password" placeholder="Password">
-                    <button type="submit" class="btn-blue">Login</button>
-                    <div class="hint">Tip: Enter your 6-digit Authenticator code as 'Username' for Quick Login.</div>
-                </form>
-                <form action="/admin/request-temp" method="post">
-                    <button type="submit" class="btn-temp">Request Console Access (10m)</button>
-                </form>
-            </div>
-        </body>
+    <head><title>Admin Login</title>
+    <style>
+        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f0f2f5; margin: 0; }
+        .box { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 320px; text-align: center; }
+        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
+        .btn-blue { width: 100%; padding: 10px; background: #0055a4; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        .btn-temp { width: 100%; padding: 8px; background: #fff; color: #d97706; border: 1px solid #d97706; border-radius: 5px; cursor: pointer; margin-top: 20px; font-size: 11px; }
+        .hint { font-size: 11px; color: #777; margin-top: 10px; }
+    </style>
+    </head>
+    <body>
+        <div class="box">
+            <h2>Admin Login</h2>
+            <form action="/admin/login" method="post">
+                <input type="text" name="username" placeholder="Username or TOTP Code" required>
+                <input type="password" name="password" placeholder="Password">
+                <button type="submit" class="btn-blue">Login</button>
+                <div class="hint">Tip: Enter your 6-digit Authenticator code as 'Username' for Quick Login.</div>
+            </form>
+            <form action="/admin/request-temp" method="post">
+                <button type="submit" class="btn-temp">Request Console Access (10m)</button>
+            </form>
+        </div>
+    </body>
     </html>
     """
 
 @app.post("/admin/login")
 async def process_login(response: Response, username: str = Form(...), password: str = Form("")):
-    # 1. QuickAuth: Check if the username field contains a valid TOTP
     if username.isdigit() and len(username) == 6:
         for device in SETTINGS["totp_devices"]:
             if pyotp.TOTP(device["secret"]).verify(username):
@@ -113,20 +133,18 @@ async def process_login(response: Response, username: str = Form(...), password:
                 resp.set_cookie(key="admin_session", value=session_id, httponly=True)
                 return resp
 
-    # 2. Standard Credentials check
     is_temp = TEMP_ACCESS and username == TEMP_ACCESS["user"] and password == TEMP_ACCESS["pass"] and datetime.now() < TEMP_ACCESS["expires"]
     is_perm = (username == SETTINGS.get("admin_user") and SETTINGS.get("admin_hash") and pwd_context.verify(password, SETTINGS["admin_hash"]))
-    
+
     if not (is_temp or is_perm):
         raise HTTPException(401, "Invalid Credentials")
 
-    # 3. Create unapproved session for 2FA step
     session_id = secrets.token_hex(16)
     plain_code = str(secrets.randbelow(9000) + 1000)
     ACTIVE_SESSIONS[session_id] = {
-        "user": username, 
-        "approved": False, 
-        "hashed_code": pwd_context.hash(plain_code), 
+        "user": username,
+        "approved": False,
+        "hashed_code": pwd_context.hash(plain_code),
         "display_code": plain_code,
         "processing": False
     }
@@ -138,52 +156,55 @@ async def process_login(response: Response, username: str = Form(...), password:
 async def verify_page(session: dict = Depends(get_session)):
     if not session: return RedirectResponse("/admin/login")
     if session["approved"]: return RedirectResponse("/admin")
-    
+
     return f"""
     <html>
-        <head>
-            <script>setInterval(() => {{ fetch('/admin/check-auth').then(r => r.json()).then(d => {{ if(d.ok) location.href='/admin'; }}) }}, 2000);</script>
-            <style>
-                body{{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;background:#fffbe6;margin:0;}} 
-                .card{{text-align:center;padding:40px;background:#fff;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,0.05); width: 350px;}} 
-                input{{padding:10px;width:100%;margin:10px 0;border-radius:5px;border:1px solid #ddd;box-sizing:border-box;}} 
-                button{{padding:10px;width:100%;background:#0055a4;color:#fff;border:none;border-radius:5px;cursor:pointer;}}
-                .btn-console {{ background: #333; margin-top: 20px; font-size: 12px; }}
-                .code-box {{ font-size: 24px; font-weight: bold; color: #d97706; margin: 10px 0; }}
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <h2>Two-Factor Authentication</h2>
-                <form action="/admin/verify-totp" method="post">
-                    <p>Enter 6-digit App Code:</p>
-                    <input type="text" name="totp_code" placeholder="000000" autofocus autocomplete="off">
-                    <button type="submit">Verify App</button>
-                </form>
-                <hr style="margin:25px 0; border:0; border-top:1px solid #eee;">
-                <p>Option 2: Use Server Console</p>
-                <div class="code-box">{session['display_code']}</div>
-                <form action="/admin/trigger-console" method="post">
-                    <button type="submit" class="btn-console">Authorize via Console</button>
-                </form>
-            </div>
-        </body>
+    <head>
+        <script>
+        setInterval(() => {{
+            fetch('/admin/check-auth').then(r => r.json()).then(d => {{ if(d.ok) location.href='/admin'; }})
+        }}, 2000);
+        </script>
+        <style>
+            body{{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;background:#fffbe6;margin:0;}} 
+            .card{{text-align:center;padding:40px;background:#fff;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,0.05); width: 350px;}} 
+            input{{padding:10px;width:100%;margin:10px 0;border-radius:5px;border:1px solid #ddd;box-sizing:border-box;}} 
+            button{{padding:10px;width:100%;background:#0055a4;color:#fff;border:none;border-radius:5px;cursor:pointer;}}
+            .btn-console {{ background: #333; margin-top: 20px; font-size: 12px; }}
+            .code-box {{ font-size: 24px; font-weight: bold; color: #d97706; margin: 10px 0; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>Two-Factor Authentication</h2>
+            <form action="/admin/verify-totp" method="post">
+                <p>Enter 6-digit App Code:</p>
+                <input type="text" name="totp_code" placeholder="000000" autofocus autocomplete="off">
+                <button type="submit">Verify App</button>
+            </form>
+            <hr style="margin:25px 0; border:0; border-top:1px solid #eee;">
+            <p>Option 2: Use Server Console</p>
+            <div class="code-box">{session['display_code']}</div>
+            <form action="/admin/trigger-console" method="post">
+                <button type="submit" class="btn-console">Authorize via Console</button>
+            </form>
+        </div>
+    </body>
     </html>
     """
 
 @app.post("/admin/trigger-console")
 async def trigger_console(session: dict = Depends(get_session)):
-    if not session or session.get("processing"): 
+    if not session or session.get("processing"):
         return RedirectResponse("/admin/verify", status_code=303)
 
     async def console_input_loop():
         session["processing"] = True
         print(f"\n[LOGIN ATTEMPT] User: {session['user']}")
         print(f"To approve, enter the code shown on the screen: {session['display_code']}")
-        
+
         loop = asyncio.get_event_loop()
         try:
-            # We use an executor because input() is blocking
             u_input = await loop.run_in_executor(None, lambda: input("Enter Code: "))
             if pwd_context.verify(u_input.strip(), session["hashed_code"]):
                 session["approved"] = True
@@ -219,8 +240,9 @@ async def request_temp():
     print(f"\n\n{'='*20}\nTEMP LOGIN DETAILS:\nUser: {user}\nPass: {pw}\n{'='*20}\n")
     return HTMLResponse(f"Credentials printed to console. <a href='/admin/login'>Back to Login</a>")
 
-# --- ADMIN PANEL & SETTINGS ---
-
+# ------------------------------
+# ADMIN PANEL
+# ------------------------------
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel(session: dict = Depends(get_session)):
     if not session or not session["approved"]: return RedirectResponse("/admin/login")
@@ -228,7 +250,7 @@ async def admin_panel(session: dict = Depends(get_session)):
     otp_uri = pyotp.totp.TOTP(new_secret).provisioning_uri(name=f"MVG_{secrets.token_hex(2)}", issuer_name="LocalServer")
     qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={otp_uri}"
     device_list_html = "".join([f"<li><b>{d['name']}</b> <a href='/admin/delete-device/{i}' style='color:red; float:right;'>Delete</a></li>" for i, d in enumerate(SETTINGS["totp_devices"])])
-    
+
     return f"""
     <html>
         <head><title>Admin Settings</title><style>
@@ -287,13 +309,17 @@ async def delete_device(index: int, session: dict = Depends(get_session)):
         save_settings()
     return RedirectResponse("/admin", status_code=303)
 
-# --- WEBSOCKET & CORE ---
-
+# ------------------------------
+# WEBSOCKET MANAGER
+# ------------------------------
 class ConnectionManager:
-    def __init__(self): self.active_connections = []
+    def __init__(self):
+        self.active_connections = []
     async def connect(self, ws: WebSocket):
-        await ws.accept(); self.active_connections.append(ws)
-        if cached_departures: await ws.send_json({"deps": cached_departures})
+        await ws.accept()
+        self.active_connections.append(ws)
+        if cached_departures:
+            await ws.send_json({"deps": cached_departures})
     def disconnect(self, ws: WebSocket):
         if ws in self.active_connections: self.active_connections.remove(ws)
     async def broadcast(self, msg: list):
@@ -303,81 +329,190 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# ------------------------------
+# MAIN BOARD WITH SCALING
+# ------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    # Frontend logic: removed max_departures dependency, it shows all incoming items
-    return HTMLResponse(content="""
+    DEST_PADDING = 40  # distance in pixels from the right column
+    html_content = f"""
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <style>
-        body { font-family: Arial, sans-serif; background: #fff; margin: 0; padding: 0; }
-        table { border-collapse: collapse; width: 100%; table-layout: fixed; }
-        td { padding: 1.5vh 2vw; border-bottom: 2px solid #eee; vertical-align: middle; }
-        .line-row { display: flex; align-items: center; gap: 15px; }
-        .icon-u { width: 60px; height: 60px; background: #0055a4; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: bold; border-radius: 8px; font-size: 35px; }
-        .icon-bus { width: 55px; height: 55px; background: #fff; color: #00656e; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 16px; border-radius: 50%; border: 4px solid #00656e; }
-        .badge { color: #fff; padding: 5px 15px; border-radius: 8px; font-weight: bold; min-width: 70px; text-align: center; font-size: 28px; }
-        .bg-u { background: #0055a4; } .bg-bus { background: #00656e; }
-        .status { font-size: 1.2em; font-weight: bold; margin-top: 5px; display: block; }
-        .ontime { color: #008542; } .delayed { color: #d00; } .scheduled { color: #666; font-style: italic; }
-        .dest { font-size: 2.5em; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .time-box { text-align: right; }
-        .clock { font-size: 1.8em; color: #444; font-weight: bold; display: block; margin-bottom: -2px; }
-        .min { font-weight: bold; font-size: 3em; color: #000; }
-        .jetzt { color: #008542; animation: blink 2s infinite; }
-        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+        :root {{
+            --scale: {SCALING};
+            --dest-padding: {DEST_PADDING}px;
+        }}
+        body {{
+            font-family: Arial, sans-serif;
+            background: #fff;
+            margin: 0;
+            padding: 0;
+        }}
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            table-layout: auto;
+            font-size: calc(14px * var(--scale));
+        }}
+        td {{
+            padding: calc(1.5vh * var(--scale)) calc(2vw * var(--scale));
+            border-bottom: 2px solid #eee;
+            vertical-align: middle;
+        }}
+        .line-row {{
+            display: flex;
+            align-items: center;
+            gap: calc(15px * var(--scale));
+        }}
+        .icon-u {{
+            width: calc(60px * var(--scale));
+            height: calc(60px * var(--scale));
+            background: #0055a4;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            border-radius: 8px;
+            font-size: calc(35px * var(--scale));
+        }}
+        .icon-bus {{
+            width: calc(55px * var(--scale));
+            height: calc(55px * var(--scale));
+            background: #fff;
+            color: #00656e;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: calc(16px * var(--scale));
+            border-radius: 50%;
+            border: calc(4px * var(--scale)) solid #00656e;
+        }}
+        .badge {{
+            color: #fff;
+            padding: calc(5px * var(--scale)) calc(15px * var(--scale));
+            border-radius: 8px;
+            font-weight: bold;
+            min-width: calc(70px * var(--scale));
+            text-align: center;
+            font-size: calc(28px * var(--scale));
+        }}
+        .bg-u {{ background: #0055a4; }}
+        .bg-bus {{ background: #00656e; }}
+        .status {{
+            font-size: calc(1.2em * var(--scale));
+            font-weight: bold;
+            margin-top: calc(5px * var(--scale));
+            display: block;
+        }}
+        .ontime {{ color: #008542; }}
+        .delayed {{ color: #d00; }}
+        .scheduled {{ color: #666; font-style: italic; }}
+
+        /* DESTINATION COLUMN */
+        .dest {{
+            font-size: calc(2.5em * var(--scale));
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding-right: var(--dest-padding);
+        }}
+
+        /* TIME COLUMN */
+        td.time-cell {{
+            width: calc(50px * var(--scale));  /* fixed width for time column */
+            text-align: right;
+            padding-left: 2px;
+            padding-right: 2px;
+            white-space: nowrap;
+        }}
+        .time-box {{
+            display: block;  /* fill td */
+            padding-right: 10px
+        }}
+        .clock {{
+            font-size: calc(1.5em * var(--scale));
+            color: #444;
+            font-weight: bold;
+            display: block;   /* first line */
+            line-height: 1;
+        }}
+        .min {{
+            font-weight: bold;
+            font-size: calc(2.2em * var(--scale));
+            color: #000;
+            display: block;   /* second line */
+            line-height: 1;
+            margin-top: 2px;
+            white-space: nowrap;
+        }}
+        .jetzt {{
+            color: #008542;
+            animation: blink 2s infinite;
+        }}
+        @keyframes blink {{
+            0% {{ opacity: 1; }}
+            50% {{ opacity: 0.5; }}
+            100% {{ opacity: 1; }}
+        }}
     </style>
 </head>
 <body>
     <table><tbody id="board"></tbody></table>
     <script>
         let lastData = [];
-        function updateUI() {
+        function updateUI() {{
             if (!lastData.length) return;
             const now = Date.now() / 1000;
             let html = "";
-            // Filters out very old departures, shows all recent/upcoming ones
-            lastData.filter(dep => (dep.time - now) > -60).forEach(dep => {
+            lastData.filter(dep => (dep.time - now) > -60).forEach(dep => {{
                 const diff = dep.time - now;
                 const minutes = Math.max(0, Math.round(diff / 60));
                 const timeObj = new Date(dep.time * 1000);
                 const clockStr = timeObj.getHours().toString().padStart(2,'0') + ":" + timeObj.getMinutes().toString().padStart(2,'0');
                 let bCls = dep.type.toLowerCase().includes("u-bahn") ? "bg-u" : "bg-bus";
                 let icon = dep.type.toLowerCase().includes("u-bahn") ? '<div class="icon-u">U</div>' : '<div class="icon-bus">BUS</div>';
-                let status = dep.realtime ? (dep.delay > 0 ? `<span class="status delayed">+${dep.delay} min</span>` : (dep.delay < 0 ? `<span class="status ontime">${dep.delay} min</span>` : '<span class="status ontime">pünktlich</span>')) : '<span class="status scheduled">Planmäßig*</span>';
-                
+                let status = dep.realtime ? (dep.delay > 0 ? `<span class="status delayed">+${{dep.delay}} min</span>` : (dep.delay < 0 ? `<span class="status ontime">${{dep.delay}} min</span>` : '<span class="status ontime">pünktlich</span>')) : '<span class="status scheduled">Planmäßig*</span>';
                 html += `<tr>
-                    <td style="width:28%"><div class="line-row">${icon}<div class="badge ${bCls}">${dep.line}</div></div>${status}</td>
-                    <td class="dest">${dep.destination}</td>
-                    <td class="time-box">
-                        <span class="clock">${clockStr}</span>
-                        <span class="min">${minutes === 0 ? '<span class="jetzt">Jetzt</span>' : minutes + ' min'}</span>
+                    <td style="width:28%"><div class="line-row">${{icon}}<div class="badge ${{bCls}}">${{dep.line}}</div></div>${{status}}</td>
+                    <td class="dest">${{dep.destination}}</td>
+                    <td class="time-cell">
+                        <div class="time-box">
+                            <span class="clock">${{clockStr}}</span>
+                            <span class="min">${{minutes === 0 ? '<span class="jetzt">Jetzt</span>' : minutes + ' min'}}</span>
+                        </div>
                     </td>
                 </tr>`;
-            });
+            }});
             document.getElementById('board').innerHTML = html;
-        }
-        function connect() {
+        }}
+        function connect() {{
             const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/ws');
-            ws.onmessage = (e) => { 
+            ws.onmessage = (e) => {{
                 const data = JSON.parse(e.data);
                 lastData = data.deps;
-                updateUI(); 
-            };
+                updateUI();
+            }};
             ws.onclose = () => setTimeout(connect, 2000);
-        }
+        }}
         setInterval(updateUI, 1000);
         connect();
     </script>
 </body>
 </html>
-""")
+"""
+    return HTMLResponse(content=html_content)
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True: await websocket.receive_text()
-    except WebSocketDisconnect: manager.disconnect(websocket)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
